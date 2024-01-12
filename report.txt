@@ -1,0 +1,11 @@
+Low Temperature: 6.00
+Normal Humidity: 55.91
+Normal Wind Speed: 5.82
+High Pressure: 1021.27
+Feels Very Cold: 3.45
+
+Average Temperature: 6.00
+Average Humidity: 55.91
+Average Wind Speed: 5.82
+Average Pressure: 1021.27
+Average Feels Like: 3.45
