@@ -1,441 +1,50 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <curl/curl.h>
-#include <jansson.h>
-
-#define API_KEY "358c78d3bca3d8cb8c0fb9b48f44ed88"
-#define API_URL "http://api.weatherstack.com/current?access_key=358c78d3bca3d8cb8c0fb9b48f44ed88&query=New%20York"
-
-#define RAW_JSON_FILE "raw.json"
-#define PROCESSED_TXT_FILE "processed.txt"
-#define REPORT_TXT_FILE "report.txt"
-
-// Gmail account details
-#define GMAIL_USERNAME "ayeshatayyab027@gmail.com"
-#define APP_PASSWORD "riew alhv xhkw ktow"  // Update this with your generated App Password
-
-// Email details
-#define TO_EMAIL "syedatoobafatimarizvi@gmail.com"
-#define SUBJECT "Weather Report Anomaly Alert"
-
-struct WeatherData {
-    double temperature;
-    double humidity;
-    double wind_speed;
-    double pressure;
-    double feels_like;
-};
-
-struct AccumulatedWeatherData {
-    double total_temperature;
-    double total_humidity;
-    double total_wind_speed;
-    double total_pressure;
-    double total_feels_like;
-    int count;
-};
-struct EmailData {
-    const char *payload_text;
-    size_t payload_size;
-    size_t sent;
-};
-
-
-// Callback function for writing received data into a string
-size_t write_callback(void *contents, size_t size, size_t nmemb, char **data) {
-    size_t realsize = size * nmemb;
-    *data = realloc(*data, realsize + 1);
-    if (*data == NULL) {
-        fprintf(stderr, "Memory allocation error\n");
-        exit(EXIT_FAILURE);
-    }
-    memcpy(*data, contents, realsize);
-    (*data)[realsize] = '\0';
-    return realsize;
-}
-
-void accumulateWeatherData(struct AccumulatedWeatherData *accumulated, const struct WeatherData *data) {
-    accumulated->total_temperature += data->temperature;
-    accumulated->total_humidity += data->humidity;
-    accumulated->total_wind_speed += data->wind_speed;
-    accumulated->total_pressure += data->pressure;
-    accumulated->total_feels_like += data->feels_like;
-    accumulated->count++;
-}
-
-void calculateAverageWeatherData(const struct AccumulatedWeatherData *accumulated, struct WeatherData *average) {
-    average->temperature = accumulated->total_temperature / accumulated->count;
-    average->humidity = accumulated->total_humidity / accumulated->count;
-    average->wind_speed = accumulated->total_wind_speed / accumulated->count;
-    average->pressure = accumulated->total_pressure / accumulated->count;
-    average->feels_like = accumulated->total_feels_like / accumulated->count;
-}
-
-
-
-static size_t payload_source(void *ptr, size_t size, size_t nmemb, void *userp) {
-    struct EmailData *upload = (struct EmailData *)userp;
-
-    if (upload->sent < upload->payload_size) {
-        size_t bytes_to_copy = size * nmemb;
-        if (bytes_to_copy > (upload->payload_size - upload->sent)) {
-            bytes_to_copy = upload->payload_size - upload->sent;
-        }
-
-        memcpy(ptr, upload->payload_text + upload->sent, bytes_to_copy);
-        upload->sent += bytes_to_copy;
-
-        return bytes_to_copy;
-    }
-
-    return 0; // No more data to send
-}
-
-
-size_t read_callback(void *ptr, size_t size, size_t nmemb, void *stream) {
-    FILE *attachment = (FILE *)stream;
-    size_t retcode = fread(ptr, size, nmemb, attachment);
-    return retcode;
-}
-
-int sendEmail(const char *to, const char *subject, const char *message, const char *attachmentPath) {
-    CURL *curl;
-    CURLcode res;
-    struct curl_slist *recipients = NULL;
-
-    // Construct email headers
-    char headers[500];
-    snprintf(headers, sizeof(headers),
-             "To: %s\r\n"
-             "From: %s\r\n"
-             "Subject: %s\r\n"
-             "Content-Type: multipart/mixed; boundary=\"frontier\"\r\n",
-             to, GMAIL_USERNAME, subject);
-
-    // Initialize libcurl
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    // Create a curl handle
-    curl = curl_easy_init();
-    if (!curl) {
-        fprintf(stderr, "Curl initialization failed\n");
-        return EXIT_FAILURE;
-    }
-
-    // Set email server details
-    curl_easy_setopt(curl, CURLOPT_USERNAME, GMAIL_USERNAME);
-    curl_easy_setopt(curl, CURLOPT_PASSWORD, APP_PASSWORD);
-
-    // Set recipient
-    recipients = curl_slist_append(recipients, to);
-    
-    // Set curl options
-    curl_easy_setopt(curl, CURLOPT_URL, "smtps://smtp.gmail.com:465");
-    curl_easy_setopt(curl, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);
-    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, GMAIL_USERNAME);
-    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-
-    // Set the headers
-    struct curl_slist *hs = NULL;
-    hs = curl_slist_append(hs, headers);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hs);
-
-    // Construct the email body
-    char email_body[500];
-    snprintf(email_body, sizeof(email_body), "Content-Type: text/plain\r\n\r\n%s", message);
-
-    // Set the email body
-    struct curl_slist *text = NULL;
-    text = curl_slist_append(text, email_body);
-    curl_easy_setopt(curl, CURLOPT_READDATA, text);
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
-
-    // Set the attachment
-    FILE *attachment = fopen(attachmentPath, "r");
-    if (attachment == NULL) {
-        fprintf(stderr, "Failed to open attachment file\n");
-        return EXIT_FAILURE;
-    }
-    curl_easy_setopt(curl, CURLOPT_READDATA, attachment);
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
-
-    // Perform the request
-    res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-    fprintf(stderr, "Curl request failed: %s\n", curl_easy_strerror(res));
-    curl_easy_cleanup(curl);
-    fclose(attachment);
-    curl_slist_free_all(recipients);
-    curl_slist_free_all(text);
-    return EXIT_FAILURE;
-}
-
-    // Cleanup
-    fclose(attachment);
-    curl_slist_free_all(recipients);
-    curl_slist_free_all(text);
-    curl_easy_cleanup(curl);
-    
-    return (int)res;
-}
-
-
-
-
-
-
-int main() {
-    CURL *curl;
-    CURLcode res;
-    char *response_data = NULL;
-
-    // Initialize libcurl
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    // Create a curl handle
-    curl = curl_easy_init();
-    if (!curl) {
-        fprintf(stderr, "Curl initialization failed\n");
-        return EXIT_FAILURE;
-    }
-
-    // Set the API URL
-    curl_easy_setopt(curl, CURLOPT_URL, API_URL);
-
-    // Set the callback function to write response data
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
-
-    // Perform the request
-    res = curl_easy_perform(curl);
-
-    // Check for errors
-    if (res != CURLE_OK) {
-        fprintf(stderr, "Curl request failed: %s\n", curl_easy_strerror(res));
-        curl_easy_cleanup(curl);
-        free(response_data);
-        return EXIT_FAILURE;
-    }
-
-    // Cleanup libcurl
-    curl_easy_cleanup(curl);
-
-    // Write raw JSON data to a file
-    FILE *raw_json_file = fopen(RAW_JSON_FILE, "w");
-    if (raw_json_file == NULL) {
-        fprintf(stderr, "Failed to open raw JSON file for writing\n");
-        free(response_data);
-        return EXIT_FAILURE;
-    }
-    fprintf(raw_json_file, "%s", response_data);
-    fclose(raw_json_file);
-
-    // Parse JSON data
-    json_error_t json_error;
-    json_t *root = json_loads(response_data, 0, &json_error);
-    free(response_data);
-
-    if (!root) {
-        fprintf(stderr, "JSON parsing error: %s\n", json_error.text);
-        return EXIT_FAILURE;
-    }
-
-    // Extract required information
-    struct WeatherData currentData;
-    currentData.temperature = json_number_value(json_object_get(json_object_get(root, "current"), "temperature"));
-    currentData.humidity = json_number_value(json_object_get(json_object_get(root, "current"), "humidity"));
-    currentData.wind_speed = json_number_value(json_object_get(json_object_get(root, "current"), "wind_speed"));
-    currentData.pressure = json_number_value(json_object_get(json_object_get(root, "current"), "pressure"));
-    currentData.feels_like = json_number_value(json_object_get(json_object_get(root, "current"), "feelslike"));
-
-    // Write processed information to a file
-    FILE *processed_txt_file = fopen(PROCESSED_TXT_FILE, "a");
-    if (processed_txt_file == NULL) {
-        fprintf(stderr, "Failed to open processed TXT file for writing\n");
-        json_decref(root);
-        return EXIT_FAILURE;
-    }
-    fprintf(processed_txt_file, "Temperature: %.2f\nHumidity: %.2f\nWind Speed: %.2f\nPressure: %.2f\nFeels Like: %.2f\n",
-            currentData.temperature, currentData.humidity, currentData.wind_speed, currentData.pressure, currentData.feels_like);
-    fclose(processed_txt_file);
-
-    // Accumulate and calculate average data
-    struct AccumulatedWeatherData accumulated = {0};
-    accumulateWeatherData(&accumulated, &currentData);
-
-    // Load and accumulate data from the previous processed.txt file
-    FILE *prev_processed_txt_file = fopen(PROCESSED_TXT_FILE, "r");
-    if (prev_processed_txt_file != NULL) {
-        while (fscanf(prev_processed_txt_file, "Temperature: %lf\nHumidity: %lf\nWind Speed: %lf\nPressure: %lf\nFeels Like: %lf\n",
-                      &currentData.temperature, &currentData.humidity, &currentData.wind_speed, &currentData.pressure, &currentData.feels_like) == 5) {
-            accumulateWeatherData(&accumulated, &currentData);
-        }
-        fclose(prev_processed_txt_file);
-    }
-
-    // Calculate average data
-    calculateAverageWeatherData(&accumulated, &currentData);
-
-    // Check for anomalies and trigger alerts
-    FILE *report_txt_file = fopen(REPORT_TXT_FILE, "w");
-    if (report_txt_file == NULL) {
-        fprintf(stderr, "Failed to open report TXT file for writing\n");
-        json_decref(root);
-        return EXIT_FAILURE;
-    }
-
-    // Thresholds for anomalies (you can adjust these values)
-    double temp_threshold = 10.0;  // Example temperature threshold
-    double humidity_threshold = 10.0;
-    double wind_speed_threshold = 20.0;  // Example wind speed threshold
-    double pressure_threshold = 10.0;
-    double feellikes_speed_threshold = 20.0;
-
-   int check = 0;
-
-// Check for temperature anomaly
-// Check for temperature anomaly
-if (currentData.temperature > (currentData.temperature + temp_threshold)) {
-    fprintf(report_txt_file, "Temperature Anomaly: %.2f\n", currentData.temperature);
-    printf("Temperature Anomaly: %.2f\n", currentData.temperature);
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Temperature Anomaly Detected! %.2f\n", currentData.temperature);
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-    check = 1;
-} else {
-    // Additional conditions for temperature
-    if (currentData.temperature > 30.0) {
-        fprintf(report_txt_file, "High Temperature: %.2f\n", currentData.temperature);
-        printf("High Temperature: %.2f\n", currentData.temperature);
-    } else if (currentData.temperature < 10.0) {
-        fprintf(report_txt_file, "Low Temperature: %.2f\n", currentData.temperature);
-        printf("Low Temperature: %.2f\n", currentData.temperature);
-    } else {
-        fprintf(report_txt_file, "Normal Temperature: %.2f\n", currentData.temperature);
-        printf("Normal Temperature: %.2f\n", currentData.temperature);
-    }
-}
-
-// Check for humidity anomaly
-if (currentData.humidity > (currentData.humidity + humidity_threshold)) {
-    fprintf(report_txt_file, "Humidity Anomaly: %.2f\n", currentData.humidity);
-    printf("Humidity Anomaly: %.2f\n", currentData.humidity);
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Humidity Anomaly Detected! %.2f\n", currentData.humidity);
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-    check = 1;
-} else {
-    // Additional conditions for humidity
-    if (currentData.humidity > 80.0) {
-        fprintf(report_txt_file, "High Humidity: %.2f\n", currentData.humidity);
-        printf("High Humidity: %.2f\n", currentData.humidity);
-    } else if (currentData.humidity < 30.0) {
-        fprintf(report_txt_file, "Low Humidity: %.2f\n", currentData.humidity);
-        printf("Low Humidity: %.2f\n", currentData.humidity);
-    } else {
-        fprintf(report_txt_file, "Normal Humidity: %.2f\n", currentData.humidity);
-        printf("Normal Humidity: %.2f\n", currentData.humidity);
-    }
-}
-
-// Check for wind speed anomaly
-if (currentData.wind_speed > (currentData.wind_speed + wind_speed_threshold)) {
-    fprintf(report_txt_file, "Wind Speed Anomaly: %.2f\n", currentData.wind_speed);
-    printf("Wind Speed Anomaly: %.2f\n", currentData.wind_speed);
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Wind Speed Anomaly Detected! %.2f\n", currentData.wind_speed);
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-    check = 1;
-} else {
-    // Additional conditions for wind speed
-    if (currentData.wind_speed > 40.0) {
-        fprintf(report_txt_file, "High Wind Speed: %.2f\n", currentData.wind_speed);
-        printf("High Wind Speed: %.2f\n", currentData.wind_speed);
-    } else if (currentData.wind_speed < 5.0) {
-        fprintf(report_txt_file, "Low Wind Speed: %.2f\n", currentData.wind_speed);
-        printf("Low Wind Speed: %.2f\n", currentData.wind_speed);
-    } else {
-        fprintf(report_txt_file, "Normal Wind Speed: %.2f\n", currentData.wind_speed);
-        printf("Normal Wind Speed: %.2f\n", currentData.wind_speed);
-    }
-}
-
-// Check for pressure anomaly
-if (currentData.pressure > (currentData.pressure + pressure_threshold)) {
-    fprintf(report_txt_file, "Pressure Anomaly: %.2f\n", currentData.pressure);
-    printf("Pressure Anomaly: %.2f\n", currentData.pressure);
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Pressure Anomaly Detected! %.2f\n", currentData.pressure);
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-    check = 1;
-} else {
-    // Additional conditions for pressure
-    if (currentData.pressure > 1015.0) {
-        fprintf(report_txt_file, "High Pressure: %.2f\n", currentData.pressure);
-        printf("High Pressure: %.2f\n", currentData.pressure);
-    } else if (currentData.pressure < 990.0) {
-        fprintf(report_txt_file, "Low Pressure: %.2f\n", currentData.pressure);
-        printf("Low Pressure: %.2f\n", currentData.pressure);
-    } else {
-        fprintf(report_txt_file, "Normal Pressure: %.2f\n", currentData.pressure);
-        printf("Normal Pressure: %.2f\n", currentData.pressure);
-    }
-}
-
-// Check for feels-like anomaly
-if (currentData.feels_like > (currentData.feels_like + feellikes_speed_threshold)) {
-    fprintf(report_txt_file, "Feels Like Anomaly: %.2f\n", currentData.feels_like);
-    printf("Feels Like Anomaly: %.2f\n", currentData.feels_like);
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Feels Like Anomaly Detected! %.2f\n", currentData.feels_like);
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-    check = 1;
-} else {
-    // Additional conditions for feels-like
-    if (currentData.feels_like > 35.0) {
-        fprintf(report_txt_file, "Feels Very Warm: %.2f\n", currentData.feels_like);
-        printf("Feels Very Warm: %.2f\n", currentData.feels_like);
-    } else if (currentData.feels_like < 10.0) {
-        fprintf(report_txt_file, "Feels Very Cold: %.2f\n", currentData.feels_like);
-        printf("Feels Very Cold: %.2f\n", currentData.feels_like);
-    } else {
-        fprintf(report_txt_file, "Feels Comfortable: %.2f\n", currentData.feels_like);
-        printf("Feels Comfortable: %.2f\n", currentData.feels_like);
-    }
-}
-
-// If anomalies detected, send email
-if (check) {
-    fclose(report_txt_file);  // Close the file to prepare for appending new data
-    printf("\nEmail sent for anomalies.\n");
-} else {
-    // Append overall averages to the report.txt file
-    fprintf(report_txt_file, "\nAverage Temperature: %.2f\nAverage Humidity: %.2f\nAverage Wind Speed: %.2f\nAverage Pressure: %.2f\nAverage Feels Like: %.2f\n",
-            currentData.temperature, currentData.humidity, currentData.wind_speed, currentData.pressure, currentData.feels_like);
-
-    // Send email if anomalies are not detected
-    // Send email if anomalies are not detected
-    char email_message[500];
-    snprintf(email_message, sizeof(email_message), "Weather Report: No anomalies detected. Details in attached report.\n");
-    sendEmail(TO_EMAIL, SUBJECT, email_message, REPORT_TXT_FILE);
-
-
-    printf("\nEmail sent for overall averages.\n");
-}
-
-fclose(report_txt_file);
-
-
-    // Cleanup
-    json_decref(root);
-
-    return EXIT_SUCCESS;
-}
-
+Temperature: 6.00
+Humidity: 57.00
+Wind Speed: 9.00
+Pressure: 1019.00
+Feels Like: 3.00
+Temperature: 6.00
+Humidity: 57.00
+Wind Speed: 9.00
+Pressure: 1019.00
+Feels Like: 3.00
+Temperature: 6.00
+Humidity: 57.00
+Wind Speed: 9.00
+Pressure: 1019.00
+Feels Like: 3.00
+Temperature: 6.00
+Humidity: 57.00
+Wind Speed: 9.00
+Pressure: 1019.00
+Feels Like: 3.00
+Temperature: 6.00
+Humidity: 57.00
+Wind Speed: 4.00
+Pressure: 1020.00
+Feels Like: 2.00
+Temperature: 6.00
+Humidity: 55.00
+Wind Speed: 4.00
+Pressure: 1023.00
+Feels Like: 4.00
+Temperature: 6.00
+Humidity: 55.00
+Wind Speed: 4.00
+Pressure: 1023.00
+Feels Like: 4.00
+Temperature: 6.00
+Humidity: 55.00
+Wind Speed: 4.00
+Pressure: 1023.00
+Feels Like: 4.00
+Temperature: 6.00
+Humidity: 55.00
+Wind Speed: 4.00
+Pressure: 1023.00
+Feels Like: 4.00
+Temperature: 6.00
+Humidity: 55.00
+Wind Speed: 4.00
+Pressure: 1023.00
+Feels Like: 4.00
