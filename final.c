@@ -206,6 +206,9 @@ if (check) {
        
         fprintf(report_txt_file, "\nAverage Temperature: %.2f\nAverage Humidity: %.2f\nAverage Wind Speed: %.2f\nAverage Pressure: %.2f\nAverage Feels Like: %.2f\n",
                 currentData.temperature, currentData.humidity, currentData.wind_speed, currentData.pressure, currentData.feels_like);
+        printf("AVERAGES OF PARAMETERS:");        
+        printf( "\nAverage Temperature: %.2f\nAverage Humidity: %.2f\nAverage Wind Speed: %.2f\nAverage Pressure: %.2f\nAverage Feels Like: %.2f\n",
+                currentData.temperature, currentData.humidity, currentData.wind_speed, currentData.pressure, currentData.feels_like);
 
         char email_message[500];
         snprintf(email_message, sizeof(email_message), "Weather Report: No anomalies detected.\n");
